@@ -186,11 +186,21 @@ bool RockchipVideoEncoder::ConfigureEncoder() {
 }
 
 bool RockchipVideoEncoder::ConfigureRateControl() {
-  // Rate control - CBR for WebRTC
-  mpp_enc_cfg_set_s32(mpp_cfg_, "rc:mode", MPP_ENC_RC_MODE_CBR);
+  // Rate control - VBR for better visual quality in WebRTC
+  // VBR allows the encoder to allocate more bits to complex frames,
+  // preventing the heavy pixelation that CBR causes under tight bounds.
+  mpp_enc_cfg_set_s32(mpp_cfg_, "rc:mode", MPP_ENC_RC_MODE_VBR);
   mpp_enc_cfg_set_s32(mpp_cfg_, "rc:bps_target", bitrate_bps_);
-  mpp_enc_cfg_set_s32(mpp_cfg_, "rc:bps_max", bitrate_bps_ * 17 / 16);
-  mpp_enc_cfg_set_s32(mpp_cfg_, "rc:bps_min", bitrate_bps_ * 15 / 16);
+  mpp_enc_cfg_set_s32(mpp_cfg_, "rc:bps_max", bitrate_bps_ * 2);
+  mpp_enc_cfg_set_s32(mpp_cfg_, "rc:bps_min", bitrate_bps_ / 4);
+
+  // QP bounds — prevent extreme quantization that causes pixelation.
+  // Lower QP = higher quality. Range: 0 (best) to 51 (worst).
+  mpp_enc_cfg_set_s32(mpp_cfg_, "rc:qp_init", 26);
+  mpp_enc_cfg_set_s32(mpp_cfg_, "rc:qp_min", 10);
+  mpp_enc_cfg_set_s32(mpp_cfg_, "rc:qp_max", 38);
+  mpp_enc_cfg_set_s32(mpp_cfg_, "rc:qp_min_i", 10);
+  mpp_enc_cfg_set_s32(mpp_cfg_, "rc:qp_max_i", 30);
 
   // FPS configuration
   mpp_enc_cfg_set_s32(mpp_cfg_, "rc:fps_in_flex", 0);
@@ -203,8 +213,9 @@ bool RockchipVideoEncoder::ConfigureRateControl() {
   // GOP configuration
   mpp_enc_cfg_set_s32(mpp_cfg_, "rc:gop", kDefaultGOP);
 
-  RTC_LOG(LS_INFO) << "Rate control configured: " << bitrate_bps_ << " bps @ "
-                   << framerate_ << " fps";
+  RTC_LOG(LS_INFO) << "Rate control configured: VBR " << bitrate_bps_
+                   << " bps @ " << framerate_ << " fps"
+                   << " (QP: init=26, I=[10,30], P=[10,38])";
   return true;
 }
 
@@ -512,8 +523,8 @@ void RockchipVideoEncoder::SetRates(const RateControlParameters& parameters) {
   MPP_RET ret = mpp_mpi_->control(mpp_ctx_, MPP_ENC_GET_CFG, mpp_cfg_);
   if (ret == MPP_OK) {
     mpp_enc_cfg_set_s32(mpp_cfg_, "rc:bps_target", bitrate_bps_);
-    mpp_enc_cfg_set_s32(mpp_cfg_, "rc:bps_max", bitrate_bps_ * 17 / 16);
-    mpp_enc_cfg_set_s32(mpp_cfg_, "rc:bps_min", bitrate_bps_ * 15 / 16);
+    mpp_enc_cfg_set_s32(mpp_cfg_, "rc:bps_max", bitrate_bps_ * 2);
+    mpp_enc_cfg_set_s32(mpp_cfg_, "rc:bps_min", bitrate_bps_ / 4);
     mpp_enc_cfg_set_s32(mpp_cfg_, "rc:fps_out_num", framerate_);
 
     ret = mpp_mpi_->control(mpp_ctx_, MPP_ENC_SET_CFG, mpp_cfg_);
