@@ -1,7 +1,7 @@
 # WebRTC Rockchip MPP Hardware Video Codec
 
 <!-- Badges -->
-![Build Status](https://img.shields.io/github/actions/workflow/status/user/webrtc-rockchip-mpp/build.yml?branch=main&label=build)
+![Build Status](https://img.shields.io/github/actions/workflow/status/AayushBarhate/webrtc-rockchip-mpp/build.yml?branch=main&label=build)
 ![License](https://img.shields.io/badge/license-BSD--3--Clause-blue)
 ![Platform](https://img.shields.io/badge/platform-RK3588%20%7C%20aarch64-green)
 ![WebRTC](https://img.shields.io/badge/WebRTC-M137-orange)
