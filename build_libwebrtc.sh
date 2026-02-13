@@ -10,6 +10,7 @@
 #   ./build_libwebrtc.sh --livekit-sdk-dir /path/to/rust-sdks
 #   ./build_libwebrtc.sh --livekit-sdk-dir /path/to/rust-sdks --profile debug
 #   ./build_libwebrtc.sh --livekit-sdk-dir /path/to/rust-sdks --arch arm64
+#   ./build_libwebrtc.sh --livekit-sdk-dir /path/to/rust-sdks --cross-compile
 #
 # Prerequisites:
 #   - depot_tools in PATH (or will be cloned automatically)
@@ -27,6 +28,7 @@ BUILD_DIR="$SCRIPT_DIR/lk-webrtc-build"
 profile="release"
 arch="arm64"
 livekit_sdk_dir=""
+cross_compile="false"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Argument parsing
@@ -39,6 +41,7 @@ Options:
   --profile <debug|release>      Build profile (default: release)
   --arch <arm64>                 Target architecture (default: arm64)
   --livekit-sdk-dir <path>       Path to LiveKit rust-sdks checkout (required)
+  --cross-compile                Cross-compile from x86_64 host (uses Chromium clang)
   -h, --help                     Show this help message
 
 Example:
@@ -65,6 +68,10 @@ while [ "$#" -gt 0 ]; do
     --livekit-sdk-dir)
       livekit_sdk_dir="$2"
       shift 2
+      ;;
+    --cross-compile)
+      cross_compile="true"
+      shift
       ;;
     -h|--help)
       usage
@@ -95,6 +102,7 @@ echo "========================================"
 echo "Building WebRTC M137 with RK3588 MPP"
 echo "  Arch:          $arch"
 echo "  Profile:       $profile"
+echo "  Cross-compile: $cross_compile"
 echo "  Build dir:     $BUILD_DIR"
 echo "  LiveKit SDK:   $livekit_sdk_dir"
 echo "  MPP source:    $SCRIPT_DIR/src/"
@@ -430,14 +438,35 @@ echo "=== Packaging artifacts ==="
 
 mkdir -p "$ARTIFACTS_DIR/lib"
 
+# Pick the right tools for native vs cross-compile
+LLVM_BIN="$BUILD_DIR/src/third_party/llvm-build/Release+Asserts/bin"
+if [ -x "$LLVM_BIN/llvm-ar" ]; then
+  AR_TOOL="$LLVM_BIN/llvm-ar"
+elif [ "$cross_compile" = "true" ] && command -v aarch64-linux-gnu-ar &>/dev/null; then
+  AR_TOOL="aarch64-linux-gnu-ar"
+else
+  AR_TOOL="ar"
+fi
+
+if [ -x "$LLVM_BIN/llvm-objcopy" ]; then
+  OBJCOPY_TOOL="$LLVM_BIN/llvm-objcopy"
+elif [ "$cross_compile" = "true" ] && command -v aarch64-linux-gnu-objcopy &>/dev/null; then
+  OBJCOPY_TOOL="aarch64-linux-gnu-objcopy"
+else
+  OBJCOPY_TOOL="objcopy"
+fi
+
+echo "  Using ar: $AR_TOOL"
+echo "  Using objcopy: $OBJCOPY_TOOL"
+
 echo "  Creating libwebrtc.a (including MPP objects)..."
-ar -rc "$ARTIFACTS_DIR/lib/libwebrtc.a" \
+"$AR_TOOL" -rc "$ARTIFACTS_DIR/lib/libwebrtc.a" \
   $(find "$OUTPUT_DIR/obj" -name '*.o' -not -path "*/third_party/nasm/*")
 
 # Apply boringssl symbol prefixing
 if [ -f "$LIVEKIT_LIBWEBRTC_DIR/boringssl_prefix_symbols.txt" ]; then
   echo "  Applying boringssl symbol prefixing..."
-  objcopy --redefine-syms="$LIVEKIT_LIBWEBRTC_DIR/boringssl_prefix_symbols.txt" \
+  "$OBJCOPY_TOOL" --redefine-syms="$LIVEKIT_LIBWEBRTC_DIR/boringssl_prefix_symbols.txt" \
     "$ARTIFACTS_DIR/lib/libwebrtc.a"
 fi
 
