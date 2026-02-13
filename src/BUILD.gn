@@ -1,0 +1,243 @@
+# Copyright 2026 The WebRTC Project Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/config/linux/pkg_config.gni")
+import("../../../../webrtc.gni")
+
+# Rockchip MPP Hardware Encoder and Decoder for RK3588
+
+# Hardware Decoder
+rtc_library("rockchip_decoder") {
+  visibility = [ "*" ]
+
+  sources = [
+    "rockchip_video_decoder.cc",
+    "rockchip_video_decoder.h",
+    "rockchip_video_decoder_factory.cc",
+    "rockchip_video_decoder_factory.h",
+  ]
+
+  deps = [
+    "../../../../api:scoped_refptr",
+    "../../../../api/video:encoded_image",
+    "../../../../api/video:video_frame",
+    "../../../../api/video:video_frame_i420",
+    "../../../../api/video:video_rtp_headers",
+    "../../../../api/video_codecs:video_codecs_api",
+    "../../../../common_video",
+    "../../../../common_video:dmabuf_video_frame_buffer",
+    "../../../../common_video/libyuv",
+    "../../../../media:rtc_media_base",
+    "../../../../modules/video_coding:video_coding_utility",
+    "../../../../rtc_base:checks",
+    "../../../../rtc_base:logging",
+    "../../../../rtc_base:rtc_base_approved",
+    "../../../../rtc_base:timeutils",
+    "../../../../rtc_base/synchronization:mutex",
+    "../../../../system_wrappers",
+    "//third_party/abseil-cpp/absl/strings",
+    "//third_party/abseil-cpp/absl/types:optional",
+  ]
+
+  # Include directories for Rockchip MPP headers
+  include_dirs = [
+    "//third_party/mpp/inc",
+  ]
+
+  # Link against Rockchip MPP library
+  libs = [
+    "rockchip_mpp",
+  ]
+
+  # Compiler definitions
+  defines = [
+    "WEBRTC_USE_MPP=1",
+    "MPP_BUFFER_TYPE_DMA_HEAP=1",
+  ]
+
+  # Compiler flags
+  cflags = [
+    "-Wno-unused-parameter",
+    "-Wno-sign-compare",
+  ]
+
+  # Only build on Linux ARM64 (RK3588)
+  if (is_linux && current_cpu == "arm64") {
+    if (!defined(rtc_use_mpp_decoder)) {
+      rtc_use_mpp_decoder = true
+    }
+  } else {
+    sources = []
+    deps = []
+  }
+}
+
+# Hardware Encoder
+rtc_library("rockchip_encoder") {
+  visibility = [ "*" ]
+
+  sources = [
+    "rockchip_video_encoder.cc",
+    "rockchip_video_encoder.h",
+    "rockchip_video_encoder_factory.cc",
+    "rockchip_video_encoder_factory.h",
+  ]
+
+  deps = [
+    "../../../../api:fec_controller_api",
+    "../../../../api:scoped_refptr",
+    "../../../../api/video:encoded_image",
+    "../../../../api/video:video_adaptation",
+    "../../../../api/video:video_bitrate_allocation",
+    "../../../../api/video:video_codec_constants",
+    "../../../../api/video:video_frame",
+    "../../../../api/video:video_frame_i420",
+    "../../../../api/video:video_rtp_headers",
+    "../../../../api/video_codecs:video_codecs_api",
+    "../../../../common_video",
+    "../../../../common_video:dmabuf_video_frame_buffer",
+    "../../../../common_video/generic_frame_descriptor",
+    "../../../../common_video/libyuv",
+    "../../../../media:rtc_media_base",
+    "../../../../modules/video_coding:video_coding_utility",
+    "../../../../rtc_base:checks",
+    "../../../../rtc_base:logging",
+    "../../../../rtc_base:rtc_base_approved",
+    "../../../../rtc_base:timeutils",
+    "../../../../rtc_base/synchronization:mutex",
+    "../../../../system_wrappers",
+    "//third_party/abseil-cpp/absl/strings",
+    "//third_party/abseil-cpp/absl/types:optional",
+  ]
+
+  # Include directories for Rockchip MPP headers
+  include_dirs = [
+    # Using vendored MPP in third_party
+    "//third_party/mpp/inc",
+  ]
+
+  # Link against Rockchip MPP library
+  libs = [
+    "rockchip_mpp",  # Main MPP library
+  ]
+
+  # Compiler definitions
+  defines = [
+    "WEBRTC_USE_MPP=1",
+    "MPP_BUFFER_TYPE_DMA_HEAP=1",
+  ]
+
+  # Compiler flags for hardware encoder
+  cflags = [
+    "-Wno-unused-parameter",
+    "-Wno-sign-compare",
+  ]
+
+  # Only build on Linux ARM64 (RK3588)
+  if (is_linux && current_cpu == "arm64") {
+    # Enable the encoder
+    if (!defined(rtc_use_mpp_encoder)) {
+      rtc_use_mpp_encoder = true
+    }
+  } else {
+    # Disable on other platforms
+    sources = []
+    deps = []
+  }
+}
+
+# Combined encoder and decoder (convenience target)
+rtc_library("rockchip_mpp") {
+  visibility = [ "*" ]
+
+  deps = [
+    ":rockchip_encoder",
+    ":rockchip_decoder",
+  ]
+}
+
+# Separate factory targets (optional)
+rtc_library("rockchip_encoder_factory") {
+  visibility = [ "*" ]
+
+  sources = [
+    "rockchip_video_encoder_factory.cc",
+    "rockchip_video_encoder_factory.h",
+  ]
+
+  deps = [
+    ":rockchip_encoder",
+    "../../../../api/video_codecs:video_codecs_api",
+    "../../../../media:rtc_media_base",
+    "../../../../rtc_base:logging",
+    "//third_party/abseil-cpp/absl/strings",
+  ]
+}
+
+rtc_library("rockchip_decoder_factory") {
+  visibility = [ "*" ]
+
+  sources = [
+    "rockchip_video_decoder_factory.cc",
+    "rockchip_video_decoder_factory.h",
+  ]
+
+  deps = [
+    ":rockchip_decoder",
+    "../../../../api/video_codecs:video_codecs_api",
+    "../../../../media:rtc_media_base",
+    "../../../../rtc_base:logging",
+    "//third_party/abseil-cpp/absl/strings",
+  ]
+}
+
+# Unit tests (optional - requires test framework setup)
+if (rtc_include_tests) {
+  rtc_library("rockchip_encoder_unittests") {
+    testonly = true
+
+    sources = [
+      "rockchip_video_encoder_unittest.cc",
+    ]
+
+    deps = [
+      ":rockchip_encoder",
+      "../../../../api:create_frame_generator",
+      "../../../../api/video:video_frame",
+      "../../../../api/video_codecs:video_codecs_api",
+      "../../../../test:test_support",
+      "../../../../test:video_test_common",
+      "//testing/gtest",
+      "//third_party/abseil-cpp/absl/types:optional",
+    ]
+  }
+
+  rtc_library("rockchip_decoder_unittests") {
+    testonly = true
+
+    sources = [
+      "rockchip_video_decoder_unittest.cc",
+    ]
+
+    deps = [
+      ":rockchip_decoder",
+      "../../../../api/video:encoded_image",
+      "../../../../api/video:video_frame",
+      "../../../../api/video_codecs:video_codecs_api",
+      "../../../../test:test_support",
+      "../../../../test:video_test_common",
+      "//testing/gtest",
+      "//third_party/abseil-cpp/absl/types:optional",
+    ]
+  }
+
+  rtc_library("rockchip_mpp_unittests") {
+    testonly = true
+
+    deps = [
+      ":rockchip_encoder_unittests",
+      ":rockchip_decoder_unittests",
+    ]
+  }
+}

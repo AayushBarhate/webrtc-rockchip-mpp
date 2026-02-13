@@ -1,0 +1,172 @@
+name: Build libwebrtc with MPP
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Build profile"
+        required: false
+        default: "release"
+        type: choice
+        options:
+          - release
+          - debug
+
+# Cancel in-progress runs for the same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Job 1: Fast lint / syntax validation (runs on any runner)
+  # ───────────────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint and validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate build script syntax
+        run: bash -n build_libwebrtc.sh
+
+      - name: Check source files exist
+        run: |
+          echo "Checking required source files..."
+          files=(
+            src/encoder/rockchip_video_encoder.h
+            src/encoder/rockchip_video_encoder.cc
+            src/encoder/rockchip_video_encoder_factory.h
+            src/encoder/rockchip_video_encoder_factory.cc
+            src/decoder/rockchip_video_decoder.h
+            src/decoder/rockchip_video_decoder.cc
+            src/decoder/rockchip_video_decoder_factory.h
+            src/decoder/rockchip_video_decoder_factory.cc
+            src/common/dmabuf_video_frame_buffer.h
+            src/common/dmabuf_video_frame_buffer.cc
+            src/BUILD.gn
+          )
+          missing=0
+          for f in "${files[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "  MISSING: $f"
+              missing=1
+            else
+              echo "  OK: $f"
+            fi
+          done
+          if [ "$missing" -eq 1 ]; then
+            echo "Error: Some required source files are missing"
+            exit 1
+          fi
+
+      - name: Check header guards and includes
+        run: |
+          echo "Checking header guard consistency..."
+          for header in src/encoder/*.h src/decoder/*.h src/common/*.h; do
+            guard=$(grep -m1 '#ifndef' "$header" | awk '{print $2}')
+            if [ -z "$guard" ]; then
+              echo "  WARNING: No include guard in $header"
+            else
+              echo "  OK: $header ($guard)"
+            fi
+          done
+
+      - name: Verify patch file format
+        run: |
+          for patch in patches/*.patch; do
+            if [ -f "$patch" ]; then
+              echo "Checking: $patch"
+              head -5 "$patch"
+              echo "---"
+            fi
+          done
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Job 2: Full build (requires arm64 self-hosted runner with MPP)
+  # ───────────────────────────────────────────────────────────────────────────
+  # NOTE: This job requires a self-hosted runner on an RK3588 board (or an
+  # aarch64 machine with cross-compilation support). It will not run on
+  # GitHub's hosted runners (which are x86_64).
+  #
+  # To set up a self-hosted runner:
+  #   1. On your RK3588 board, follow:
+  #      https://docs.github.com/en/actions/hosting-your-own-runners
+  #   2. Add labels: self-hosted, linux, arm64
+  #   3. Ensure librockchip_mpp.so is installed
+  build:
+    name: Build libwebrtc (${{ github.event.inputs.profile || 'release' }})
+    runs-on: [self-hosted, linux, arm64]
+    # Only run on workflow_dispatch or push to main (skip on PRs to save runner time)
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    needs: lint
+    timeout-minutes: 120
+
+    env:
+      PROFILE: ${{ github.event.inputs.profile || 'release' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout LiveKit rust-sdks
+        uses: actions/checkout@v4
+        with:
+          repository: livekit/rust-sdks
+          path: rust-sdks
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git \
+            python3 \
+            pkg-config \
+            ninja-build \
+            cpio \
+            binutils
+
+      - name: Run build script
+        run: |
+          chmod +x build_libwebrtc.sh
+          ./build_libwebrtc.sh \
+            --livekit-sdk-dir "${{ github.workspace }}/rust-sdks" \
+            --profile "$PROFILE" \
+            --arch arm64
+
+      - name: Verify MPP symbols
+        run: |
+          echo "Checking for Rockchip symbols in libwebrtc.a..."
+          LIBPATH="lk-webrtc-build/linux-arm64-${PROFILE}/lib/libwebrtc.a"
+
+          if [ ! -f "$LIBPATH" ]; then
+            echo "Error: $LIBPATH not found"
+            exit 1
+          fi
+
+          count=$(nm "$LIBPATH" | grep -ci Rockchip || true)
+          echo "Found $count Rockchip symbols"
+
+          if [ "$count" -eq 0 ]; then
+            echo "Error: No Rockchip symbols found in libwebrtc.a"
+            exit 1
+          fi
+
+          echo ""
+          echo "Sample symbols:"
+          nm "$LIBPATH" | grep -i Rockchip | head -20
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libwebrtc-arm64-${{ env.PROFILE }}
+          path: |
+            lk-webrtc-build/linux-arm64-${{ env.PROFILE }}/lib/libwebrtc.a
+            lk-webrtc-build/linux-arm64-${{ env.PROFILE }}/args.gn
+          retention-days: 30
+          if-no-files-found: error

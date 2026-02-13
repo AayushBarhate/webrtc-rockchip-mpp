@@ -1,0 +1,27 @@
+From: WebRTC Rockchip MPP <noreply@example.com>
+Subject: [PATCH] Disable CREL assembler flag for RK3588 toolchain compatibility
+
+The --crel and --allow-experimental-crel assembler flags are not supported
+by all toolchains and cause build failures on aarch64 cross-compilation
+environments. This patch comments out the offending lines.
+
+---
+ build/config/compiler/BUILD.gn | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/build/config/compiler/BUILD.gn b/build/config/compiler/BUILD.gn
+index 1234567..abcdefg 100644
+--- a/build/config/compiler/BUILD.gn
++++ b/build/config/compiler/BUILD.gn
+@@ -1,8 +1,8 @@
+   # CREL
+-  if (is_linux && use_lld && !llvm_android_mainline &&
+-      default_toolchain != "//build/toolchain/cros:target") {
+-    cflags += [ "-Wa,--crel,--allow-experimental-crel" ]
+-  }
++  # if (is_linux && use_lld && !llvm_android_mainline &&
++  #     default_toolchain != "//build/toolchain/cros:target") {
++  #   cflags += [ "-Wa,--crel,--allow-experimental-crel" ]
++  # }
+--
+2.39.0

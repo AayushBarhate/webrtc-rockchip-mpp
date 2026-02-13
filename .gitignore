@@ -1,0 +1,26 @@
+# Build output directories
+lk-webrtc-build/
+out-*/
+linux-arm64-*/
+
+# depot_tools (cloned during build)
+depot_tools/
+
+# Compiled objects and archives
+*.o
+*.a
+
+# Python bytecode
+*.pyc
+__pycache__/
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
