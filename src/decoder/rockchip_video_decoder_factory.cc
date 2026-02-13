@@ -48,14 +48,39 @@ RockchipVideoDecoderFactory::GetSupportedFormats() const {
     return supported_formats;
   }
 
-  // H.264 Constrained Baseline Profile (most common in WebRTC)
+  // MPP hardware decoder handles all H.264 profiles.
+  // Advertise all of them so the wrapper's IsSameCodec check matches
+  // regardless of what profile the remote peer negotiates.
+
+  // Constrained Baseline (42e01f) — most common in WebRTC
   supported_formats.push_back(SdpVideoFormat(
       kH264CodecName,
       {{kH264FmtpProfileLevelId, kH264ProfileLevelConstrainedBaseline},
        {kH264FmtpLevelAsymmetryAllowed, "1"},
        {kH264FmtpPacketizationMode, "1"}}));
 
-  // H.264 Constrained High Profile
+  // Baseline (42001f)
+  supported_formats.push_back(SdpVideoFormat(
+      kH264CodecName,
+      {{kH264FmtpProfileLevelId, "42001f"},
+       {kH264FmtpLevelAsymmetryAllowed, "1"},
+       {kH264FmtpPacketizationMode, "1"}}));
+
+  // Main (4d001f)
+  supported_formats.push_back(SdpVideoFormat(
+      kH264CodecName,
+      {{kH264FmtpProfileLevelId, "4d001f"},
+       {kH264FmtpLevelAsymmetryAllowed, "1"},
+       {kH264FmtpPacketizationMode, "1"}}));
+
+  // High (64001f)
+  supported_formats.push_back(SdpVideoFormat(
+      kH264CodecName,
+      {{kH264FmtpProfileLevelId, "64001f"},
+       {kH264FmtpLevelAsymmetryAllowed, "1"},
+       {kH264FmtpPacketizationMode, "1"}}));
+
+  // Constrained High (640c1f)
   supported_formats.push_back(SdpVideoFormat(
       kH264CodecName,
       {{kH264FmtpProfileLevelId, kH264ProfileLevelConstrainedHigh},

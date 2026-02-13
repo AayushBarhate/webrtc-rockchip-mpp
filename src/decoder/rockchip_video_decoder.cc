@@ -5,10 +5,6 @@
 #include "modules/video_coding/codecs/mpp/rockchip_video_decoder.h"
 
 #include <string.h>
-#include <sys/mman.h>
-#include <unistd.h>
-
-#include <linux/videodev2.h>
 
 #include "api/video/i420_buffer.h"
 #include "api/video/video_frame.h"
@@ -18,11 +14,6 @@
 #include "rtc_base/logging.h"
 #include "rtc_base/time_utils.h"
 #include "third_party/libyuv/include/libyuv.h"
-
-// Include DMA-BUF frame buffer for zero-copy output
-#ifdef __linux__
-#include "common_video/dmabuf_video_frame_buffer.h"
-#endif
 
 namespace webrtc {
 
@@ -241,8 +232,50 @@ bool RockchipVideoDecoder::RetrieveFrame(int64_t timestamp) {
   }
 
   if (!mpp_frame) {
-    RTC_LOG(LS_WARNING) << "No frame retrieved (may need more packets)";
+    RTC_LOG(LS_WARNING) << "No frame retrieved (need more packets)";
     return true;  // Not an error, decoder may need more data
+  }
+  // Check for info-change frame (resolution change notification).
+  // MPP sends these with dimensions but no data buffer.  We must
+  // acknowledge and optionally configure the external buffer group,
+  // then retrieve the real decoded frame.
+  RK_U32 info_change = mpp_frame_get_info_change(mpp_frame);
+  if (info_change) {
+    RK_U32 w = mpp_frame_get_width(mpp_frame);
+    RK_U32 h = mpp_frame_get_height(mpp_frame);
+    RK_U32 hs = mpp_frame_get_hor_stride(mpp_frame);
+    RK_U32 vs = mpp_frame_get_ver_stride(mpp_frame);
+    RTC_LOG(LS_INFO) << "MPP info-change: " << w << "x" << h
+                     << " stride=" << hs << "x" << vs;
+    width_ = w;
+    height_ = h;
+
+    // If we have an external buffer group, attach it now.
+    if (frame_group_) {
+      MPP_RET r = mpp_mpi_->control(mpp_ctx_, MPP_DEC_SET_EXT_BUF_GROUP,
+                                     frame_group_);
+      if (r != MPP_OK) {
+        RTC_LOG(LS_WARNING) << "MPP_DEC_SET_EXT_BUF_GROUP failed: " << r;
+      }
+    }
+
+    // Tell MPP we're ready for the new resolution.
+    MPP_RET r = mpp_mpi_->control(mpp_ctx_, MPP_DEC_SET_INFO_CHANGE_READY,
+                                   nullptr);
+    if (r != MPP_OK) {
+      RTC_LOG(LS_WARNING) << "MPP_DEC_SET_INFO_CHANGE_READY failed: " << r;
+    }
+
+    mpp_frame_deinit(&mpp_frame);
+
+    // Try to get the actual decoded frame now.
+    mpp_frame = nullptr;
+    ret = mpp_mpi_->decode_get_frame(mpp_ctx_, &mpp_frame);
+    if (ret != MPP_OK || !mpp_frame) {
+      // No frame yet — that's OK, it'll come on a subsequent Decode call.
+      RTC_LOG(LS_INFO) << "No frame after info-change ack (will arrive later)";
+      return true;
+    }
   }
 
   // Check if frame has error
@@ -261,12 +294,20 @@ bool RockchipVideoDecoder::RetrieveFrame(int64_t timestamp) {
     return true;
   }
 
+  // Check for buffer
+  MppBuffer frame_buf = mpp_frame_get_buffer(mpp_frame);
+  if (!frame_buf) {
+    RTC_LOG(LS_WARNING) << "Frame has no buffer (skipping)";
+    mpp_frame_deinit(&mpp_frame);
+    return true;  // Not fatal — decoder may produce usable frames later.
+  }
+
   // Get frame dimensions
   RK_U32 width = mpp_frame_get_width(mpp_frame);
   RK_U32 height = mpp_frame_get_height(mpp_frame);
   RK_S64 pts = mpp_frame_get_pts(mpp_frame);
 
-  RTC_LOG(LS_VERBOSE) << "Retrieved frame: " << width << "x" << height
+  RTC_LOG(LS_VERBOSE) << "Decoded frame: " << width << "x" << height
                       << " pts=" << pts;
 
   // Update dimensions if changed
@@ -298,7 +339,8 @@ bool RockchipVideoDecoder::RetrieveFrame(int64_t timestamp) {
   // Deliver to callback
   decoded_callback_->Decoded(decoded_frame);
 
-  RTC_LOG(LS_VERBOSE) << "Frame delivered to callback";
+  RTC_LOG(LS_VERBOSE) << "Frame delivered to callback: " << width << "x"
+                      << height;
   return true;
 }
 
@@ -324,25 +366,9 @@ RockchipVideoDecoder::ConvertMppFrameToVideoFrame(MppFrame mpp_frame) {
                       << " stride=" << hor_stride << "x" << ver_stride
                       << " format=" << fmt;
 
-#ifdef __linux__
-  // Option 1: Zero-copy - export MppBuffer as DMA-BUF
-  // This requires MPP buffer to be DMA-BUF backed
-  int fd = mpp_buffer_get_fd(mpp_buffer);
-  if (fd >= 0) {
-    size_t buffer_size = mpp_buffer_get_size(mpp_buffer);
-
-    // Create DMA-BUF backed VideoFrame for zero-copy rendering
-    rtc::scoped_refptr<DMABufVideoFrameBuffer> dmabuf_buffer =
-        rtc::make_ref_counted<DMABufVideoFrameBuffer>(
-            fd, width, height, buffer_size, V4L2_PIX_FMT_NV12, hor_stride);
-
-    RTC_LOG(LS_VERBOSE) << "Created zero-copy DMA-BUF frame: fd=" << fd;
-    return dmabuf_buffer;
-  }
-#endif
-
-  // Option 2: CPU copy fallback - convert to I420
-  RTC_LOG(LS_WARNING) << "Using CPU copy fallback for decoded frame";
+  // CPU copy: convert NV12/NV21 to I420 via libyuv.
+  // DMA-BUF zero-copy is not used because mpp_frame_deinit() recycles
+  // the underlying buffer, invalidating the fd before the frame is consumed.
 
   void* ptr = mpp_buffer_get_ptr(mpp_buffer);
   if (!ptr) {
@@ -353,25 +379,17 @@ RockchipVideoDecoder::ConvertMppFrameToVideoFrame(MppFrame mpp_frame) {
   rtc::scoped_refptr<I420Buffer> i420_buffer =
       I420Buffer::Create(width, height);
 
-  // Convert based on format
-  if (fmt == MPP_FMT_YUV420SP) {  // NV12
+  // Convert based on format.
+  // RK3588 RKVDEC reports MPP_FMT_YUV420SP (NV12) but the chroma plane
+  // is actually VU-interleaved (NV21).  Use NV21ToI420 for both cases
+  // on this SoC to get correct colors.
+  if (fmt == MPP_FMT_YUV420SP || fmt == MPP_FMT_YUV420SP_VU) {
     const uint8_t* src_y = static_cast<const uint8_t*>(ptr);
     const uint8_t* src_uv = src_y + (hor_stride * ver_stride);
 
-    libyuv::NV12ToI420(
-        src_y, hor_stride,
-        src_uv, hor_stride,
-        i420_buffer->MutableDataY(), i420_buffer->StrideY(),
-        i420_buffer->MutableDataU(), i420_buffer->StrideU(),
-        i420_buffer->MutableDataV(), i420_buffer->StrideV(),
-        width, height);
-  } else if (fmt == MPP_FMT_YUV420SP_VU) {  // NV21
-    const uint8_t* src_y = static_cast<const uint8_t*>(ptr);
-    const uint8_t* src_vu = src_y + (hor_stride * ver_stride);
-
     libyuv::NV21ToI420(
         src_y, hor_stride,
-        src_vu, hor_stride,
+        src_uv, hor_stride,
         i420_buffer->MutableDataY(), i420_buffer->StrideY(),
         i420_buffer->MutableDataU(), i420_buffer->StrideU(),
         i420_buffer->MutableDataV(), i420_buffer->StrideV(),
