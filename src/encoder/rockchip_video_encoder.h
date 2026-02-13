@@ -80,7 +80,8 @@ class RockchipVideoEncoder : public VideoEncoder {
   bool ConfigureRateControl();
   MppBuffer ImportDMABuffer(int fd, size_t size, int width, int height);
   bool SendFrame(MppFrame mpp_frame);
-  bool RetrievePacket(int64_t timestamp_us, VideoFrameType frame_type);
+  bool RetrievePacket(int64_t timestamp_us, VideoFrameType frame_type,
+                      bool force_keyframe = false);
 
   // Disallow copy and assign
   RockchipVideoEncoder(const RockchipVideoEncoder&) = delete;

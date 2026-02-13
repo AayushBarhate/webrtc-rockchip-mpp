@@ -8,9 +8,12 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include "api/scoped_refptr.h"
 #include "api/video/i420_buffer.h"
 #include "api/video/video_frame_buffer.h"
 #include "common_video/libyuv/include/webrtc_libyuv.h"
+#include "modules/video_coding/codecs/h264/include/h264_globals.h"
+#include "modules/video_coding/include/video_codec_interface.h"
 #include "modules/video_coding/include/video_error_codes.h"
 #include "rtc_base/checks.h"
 #include "rtc_base/logging.h"
@@ -30,8 +33,7 @@ namespace {
 constexpr int kDefaultGOP = 60;
 constexpr int kDefaultFPS = 30;
 constexpr int kDefaultBitrate = 2000000;  // 2 Mbps
-constexpr int kMaxFrameSize = 4096;
-constexpr int kIDRFrameInterval = 60;  // Force IDR every 60 frames
+constexpr int kIDRFrameInterval = 60;     // Force IDR every 60 frames
 
 // Helper to convert WebRTC frame type to MPP
 bool IsKeyFrame(const std::vector<VideoFrameType>* frame_types) {
@@ -102,10 +104,10 @@ int RockchipVideoEncoder::InitEncode(
     return WEBRTC_VIDEO_CODEC_ERROR;
   }
 
-  // Step 3: Create buffer group for external DMA-BUF import
-  ret = mpp_buffer_group_get_external(&buffer_group_, MPP_BUFFER_TYPE_DMA_HEAP);
+  // Step 3: Create internal buffer group for frame allocation
+  ret = mpp_buffer_group_get_internal(&buffer_group_, MPP_BUFFER_TYPE_ION);
   if (ret != MPP_OK) {
-    RTC_LOG(LS_ERROR) << "mpp_buffer_group_get_external failed: " << ret;
+    RTC_LOG(LS_ERROR) << "mpp_buffer_group_get_internal failed: " << ret;
     Release();
     return WEBRTC_VIDEO_CODEC_ERROR;
   }
@@ -138,17 +140,25 @@ int RockchipVideoEncoder::InitEncode(
     return WEBRTC_VIDEO_CODEC_ERROR;
   }
 
-  // Step 6: Configure SEI (optional but useful for WebRTC)
+  // Step 6: Configure SEI
   MppEncSeiMode sei_mode = MPP_ENC_SEI_MODE_ONE_FRAME;
   ret = mpp_mpi_->control(mpp_ctx_, MPP_ENC_SET_SEI_CFG, &sei_mode);
   if (ret != MPP_OK) {
     RTC_LOG(LS_WARNING) << "MPP_ENC_SET_SEI_CFG failed: " << ret;
   }
 
+  // Step 7: Prepend SPS/PPS to each IDR frame
+  MppEncHeaderMode header_mode = MPP_ENC_HEADER_MODE_EACH_IDR;
+  ret = mpp_mpi_->control(mpp_ctx_, MPP_ENC_SET_HEADER_MODE, &header_mode);
+  if (ret != MPP_OK) {
+    RTC_LOG(LS_WARNING) << "MPP_ENC_SET_HEADER_MODE failed: " << ret;
+  }
+
   frame_count_ = 0;
   last_timestamp_ms_ = 0;
 
-  RTC_LOG(LS_INFO) << "RockchipVideoEncoder initialized successfully";
+  RTC_LOG(LS_INFO) << "RockchipVideoEncoder initialized successfully"
+                   << " (Constrained Baseline Profile)";
   return WEBRTC_VIDEO_CODEC_OK;
 }
 
@@ -162,15 +172,16 @@ bool RockchipVideoEncoder::ConfigureEncoder() {
                       MPP_ALIGN(codec_settings_.height, 16));
   mpp_enc_cfg_set_s32(mpp_cfg_, "prep:format", MPP_FMT_YUV420SP);  // NV12
 
-  // Codec configuration - H.264 High Profile
+  // H.264 Constrained Baseline Profile — required for WebRTC browser compat.
+  // The factory advertises CB in SDP; the encoder MUST match.
   mpp_enc_cfg_set_s32(mpp_cfg_, "codec:type", MPP_VIDEO_CodingAVC);
-  mpp_enc_cfg_set_s32(mpp_cfg_, "h264:profile", 100);  // High Profile
-  mpp_enc_cfg_set_s32(mpp_cfg_, "h264:level", 41);     // Level 4.1
-  mpp_enc_cfg_set_s32(mpp_cfg_, "h264:cabac_en", 1);
+  mpp_enc_cfg_set_s32(mpp_cfg_, "h264:profile", 66);   // Baseline Profile
+  mpp_enc_cfg_set_s32(mpp_cfg_, "h264:level", 31);     // Level 3.1
+  mpp_enc_cfg_set_s32(mpp_cfg_, "h264:cabac_en", 0);   // CAVLC only (Baseline)
   mpp_enc_cfg_set_s32(mpp_cfg_, "h264:cabac_idc", 0);
-  mpp_enc_cfg_set_s32(mpp_cfg_, "h264:trans8x8", 1);
+  mpp_enc_cfg_set_s32(mpp_cfg_, "h264:trans8x8", 0);   // No 8x8 (Baseline)
 
-  RTC_LOG(LS_INFO) << "Encoder configuration applied";
+  RTC_LOG(LS_INFO) << "Encoder: Constrained Baseline, Level 3.1";
   return true;
 }
 
@@ -272,7 +283,9 @@ int32_t RockchipVideoEncoder::Encode(
     return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
   }
 
-  bool force_keyframe = IsKeyFrame(frame_types) || (frame_count_ % kIDRFrameInterval == 0);
+  bool force_keyframe = IsKeyFrame(frame_types) ||
+                        (frame_count_ == 0) ||
+                        (frame_count_ % kIDRFrameInterval == 0);
   VideoFrameType webrtc_frame_type = force_keyframe
                                           ? VideoFrameType::kVideoFrameKey
                                           : VideoFrameType::kVideoFrameDelta;
@@ -372,7 +385,8 @@ cpu_copy:
   mpp_frame_deinit(&mpp_frame);
 
   // Retrieve encoded packet
-  if (!RetrievePacket(frame.timestamp_us(), webrtc_frame_type)) {
+  if (!RetrievePacket(frame.timestamp_us(), webrtc_frame_type,
+                      force_keyframe)) {
     return WEBRTC_VIDEO_CODEC_ERROR;
   }
 
@@ -390,7 +404,8 @@ bool RockchipVideoEncoder::SendFrame(MppFrame mpp_frame) {
 }
 
 bool RockchipVideoEncoder::RetrievePacket(int64_t timestamp_us,
-                                           VideoFrameType frame_type) {
+                                           VideoFrameType frame_type,
+                                           bool force_keyframe) {
   MppPacket mpp_packet = nullptr;
 
   // Retrieve encoded packet (blocking)
@@ -410,9 +425,34 @@ bool RockchipVideoEncoder::RetrievePacket(int64_t timestamp_us,
   size_t packet_size = mpp_packet_get_length(mpp_packet);
   RK_U32 packet_flag = mpp_packet_get_flag(mpp_packet);
 
+  // Detect keyframes via MPP flag
   bool is_keyframe = (packet_flag & MPP_PACKET_FLAG_INTRA) != 0;
+
+  // Also check H.264 NAL unit type for keyframe detection
+  // (MPP doesn't always set the INTRA flag reliably)
+  if (!is_keyframe && packet_size >= 5) {
+    const uint8_t* p = static_cast<const uint8_t*>(packet_data);
+    // Skip Annex B start code (00 00 00 01 or 00 00 01)
+    int offset = 0;
+    if (p[0] == 0 && p[1] == 0 && p[2] == 0 && p[3] == 1) offset = 4;
+    else if (p[0] == 0 && p[1] == 0 && p[2] == 1) offset = 3;
+    if (offset > 0 && (int)packet_size > offset) {
+      uint8_t nal_type = p[offset] & 0x1F;
+      // NAL type 5 = IDR slice, NAL type 7 = SPS (precedes IDR)
+      if (nal_type == 7 || nal_type == 5) {
+        is_keyframe = true;
+      }
+    }
+  }
+
+  // If we requested a keyframe, trust our request
+  if (force_keyframe) {
+    is_keyframe = true;
+  }
+
   VideoFrameType actual_frame_type =
-      is_keyframe ? VideoFrameType::kVideoFrameKey : VideoFrameType::kVideoFrameDelta;
+      is_keyframe ? VideoFrameType::kVideoFrameKey
+                  : VideoFrameType::kVideoFrameDelta;
 
   RTC_LOG(LS_VERBOSE) << "Retrieved packet: size=" << packet_size
                       << " keyframe=" << is_keyframe;
@@ -425,15 +465,24 @@ bool RockchipVideoEncoder::RetrievePacket(int64_t timestamp_us,
   encoded_image._encodedWidth = codec_settings_.width;
   encoded_image._encodedHeight = codec_settings_.height;
   encoded_image._frameType = actual_frame_type;
-  encoded_image.SetRtpTimestamp(static_cast<uint32_t>(timestamp_us / 1000));
+  encoded_image.SetRtpTimestamp(frame_count_);
   encoded_image.capture_time_ms_ = timestamp_us / 1000;
 
   // Release packet
   mpp_packet_deinit(&mpp_packet);
 
+  // H.264 codec-specific info required for proper RTP packetization
+  CodecSpecificInfo codec_info;
+  codec_info.codecType = kVideoCodecH264;
+  codec_info.codecSpecific.H264.packetization_mode =
+      H264PacketizationMode::NonInterleaved;
+  codec_info.codecSpecific.H264.temporal_idx = kNoTemporalIdx;
+  codec_info.codecSpecific.H264.idr_frame = is_keyframe;
+  codec_info.codecSpecific.H264.base_layer_sync = false;
+
   // Deliver to callback
   EncodedImageCallback::Result result =
-      encoded_callback_->OnEncodedImage(encoded_image, nullptr);
+      encoded_callback_->OnEncodedImage(encoded_image, &codec_info);
 
   if (result.error != EncodedImageCallback::Result::OK) {
     RTC_LOG(LS_ERROR) << "Encode callback failed: " << result.error;
