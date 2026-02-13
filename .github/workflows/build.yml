@@ -1,10 +1,6 @@
 name: Build libwebrtc with MPP
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
     inputs:
       profile:
@@ -15,16 +11,17 @@ on:
         options:
           - release
           - debug
+      create_release:
+        description: "Create a GitHub release with the built artifact"
+        required: false
+        default: true
+        type: boolean
 
-# Cancel in-progress runs for the same branch
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # ───────────────────────────────────────────────────────────────────────────
-  # Job 1: Fast lint / syntax validation (runs on any runner)
-  # ───────────────────────────────────────────────────────────────────────────
   lint:
     name: Lint and validate
     runs-on: ubuntu-latest
@@ -65,9 +62,8 @@ jobs:
             exit 1
           fi
 
-      - name: Check header guards and includes
+      - name: Check header guards
         run: |
-          echo "Checking header guard consistency..."
           for header in src/encoder/*.h src/decoder/*.h src/common/*.h; do
             guard=$(grep -m1 '#ifndef' "$header" | awk '{print $2}')
             if [ -z "$guard" ]; then
@@ -77,33 +73,13 @@ jobs:
             fi
           done
 
-      - name: Verify patch file format
-        run: |
-          for patch in patches/*.patch; do
-            if [ -f "$patch" ]; then
-              echo "Checking: $patch"
-              head -5 "$patch"
-              echo "---"
-            fi
-          done
-
-  # ───────────────────────────────────────────────────────────────────────────
-  # Job 2: Full build (requires arm64 self-hosted runner with MPP)
-  # ───────────────────────────────────────────────────────────────────────────
-  # NOTE: This job requires a self-hosted runner on an RK3588 board (or an
-  # aarch64 machine with cross-compilation support). It will not run on
-  # GitHub's hosted runners (which are x86_64).
-  #
-  # To set up a self-hosted runner:
-  #   1. On your RK3588 board, follow:
-  #      https://docs.github.com/en/actions/hosting-your-own-runners
-  #   2. Add labels: self-hosted, linux, arm64
-  #   3. Ensure librockchip_mpp.so is installed
+  # Requires a self-hosted arm64 runner (RK3588 board).
+  # Setup: https://docs.github.com/en/actions/hosting-your-own-runners
+  # Labels: self-hosted, linux, arm64
+  # Prerequisite: librockchip_mpp.so installed on the runner
   build:
     name: Build libwebrtc (${{ github.event.inputs.profile || 'release' }})
     runs-on: [self-hosted, linux, arm64]
-    # Only run on workflow_dispatch or push to main (skip on PRs to save runner time)
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     needs: lint
     timeout-minutes: 120
 
@@ -124,12 +100,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            git \
-            python3 \
-            pkg-config \
-            ninja-build \
-            cpio \
-            binutils
+            git python3 pkg-config ninja-build cpio binutils
 
       - name: Run build script
         run: |
@@ -141,27 +112,21 @@ jobs:
 
       - name: Verify MPP symbols
         run: |
-          echo "Checking for Rockchip symbols in libwebrtc.a..."
           LIBPATH="lk-webrtc-build/linux-arm64-${PROFILE}/lib/libwebrtc.a"
-
           if [ ! -f "$LIBPATH" ]; then
             echo "Error: $LIBPATH not found"
             exit 1
           fi
-
           count=$(nm "$LIBPATH" | grep -ci Rockchip || true)
           echo "Found $count Rockchip symbols"
-
           if [ "$count" -eq 0 ]; then
             echo "Error: No Rockchip symbols found in libwebrtc.a"
             exit 1
           fi
-
-          echo ""
           echo "Sample symbols:"
           nm "$LIBPATH" | grep -i Rockchip | head -20
 
-      - name: Upload artifact
+      - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: libwebrtc-arm64-${{ env.PROFILE }}
@@ -170,3 +135,39 @@ jobs:
             lk-webrtc-build/linux-arm64-${{ env.PROFILE }}/args.gn
           retention-days: 30
           if-no-files-found: error
+
+      - name: Package release tarball
+        if: github.event.inputs.create_release == 'true'
+        run: |
+          mkdir -p release-staging
+          cp lk-webrtc-build/linux-arm64-${PROFILE}/lib/libwebrtc.a release-staging/
+          cp lk-webrtc-build/linux-arm64-${PROFILE}/args.gn release-staging/
+          echo "profile=${PROFILE}" > release-staging/build-info.txt
+          echo "commit=$(git rev-parse --short HEAD)" >> release-staging/build-info.txt
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> release-staging/build-info.txt
+          tar czf "libwebrtc-mpp-arm64-${PROFILE}.tar.gz" -C release-staging .
+          ls -lh "libwebrtc-mpp-arm64-${PROFILE}.tar.gz"
+
+      - name: Create GitHub release
+        if: github.event.inputs.create_release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v$(date -u +%Y%m%d)-$(git rev-parse --short HEAD)"
+          gh release create "$TAG" \
+            "libwebrtc-mpp-arm64-${PROFILE}.tar.gz" \
+            --title "libwebrtc M137 + MPP ($TAG)" \
+            --notes "$(cat <<EOF
+          Built from commit $(git rev-parse --short HEAD) on $(date -u +%Y-%m-%d).
+
+          **Profile:** ${PROFILE}
+          **Target:** aarch64 (RK3588)
+          **Contents:** libwebrtc.a with Rockchip MPP H.264 encoder/decoder
+
+          Download and extract:
+          \`\`\`bash
+          tar xzf libwebrtc-mpp-arm64-${PROFILE}.tar.gz -C ~/linux-arm64-release/lib/
+          \`\`\`
+          EOF
+          )"
+          echo "Created release: $TAG"
