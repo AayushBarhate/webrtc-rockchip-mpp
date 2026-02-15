@@ -166,14 +166,31 @@ jobs:
           tar czf "libwebrtc-mpp-arm64-${PROFILE}.tar.gz" -C release-staging .
           ls -lh "libwebrtc-mpp-arm64-${PROFILE}.tar.gz"
 
+      - name: Package LiveKit-compatible zip
+        if: github.event.inputs.create_release == 'true'
+        run: |
+          FULL_DIR="lk-webrtc-build/linux-arm64-${PROFILE}"
+          if [ -d "$FULL_DIR/lib" ] && [ -d "$FULL_DIR/include" ]; then
+            cd lk-webrtc-build
+            zip -r "$GITHUB_WORKSPACE/webrtc-linux-arm64-${PROFILE}.zip" \
+              "linux-arm64-${PROFILE}/"
+            ls -lh "$GITHUB_WORKSPACE/webrtc-linux-arm64-${PROFILE}.zip"
+          else
+            echo "Full artifact dir not available (headers missing). Skipping zip."
+          fi
+
       - name: Create GitHub release
         if: github.event.inputs.create_release == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="v$(date -u +%Y%m%d)-$(git rev-parse --short HEAD)"
+          ASSETS=("libwebrtc-mpp-arm64-${PROFILE}.tar.gz")
+          if [ -f "webrtc-linux-arm64-${PROFILE}.zip" ]; then
+            ASSETS+=("webrtc-linux-arm64-${PROFILE}.zip")
+          fi
           gh release create "$TAG" \
-            "libwebrtc-mpp-arm64-${PROFILE}.tar.gz" \
+            "${ASSETS[@]}" \
             --title "libwebrtc M137 + MPP ($TAG)" \
             --notes "$(cat <<EOF
           Built from commit $(git rev-parse --short HEAD) on $(date -u +%Y-%m-%d).
