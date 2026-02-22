@@ -269,7 +269,7 @@ int RockchipVideoEncoder::InitEncode(
   }
 
   const char* codec_name = (codec_type_ == MPP_VIDEO_CodingHEVC)
-                               ? "HEVC Main" : "H.264 Constrained Baseline";
+                               ? "HEVC Main" : "H.264 High";
   RTC_LOG(LS_INFO) << "RockchipVideoEncoder initialized successfully"
                    << " (" << codec_name << ", stride="
                    << hor_stride_ << "x" << ver_stride_ << ")";
@@ -297,42 +297,41 @@ bool RockchipVideoEncoder::ConfigureEncoder() {
     mpp_enc_cfg_set_s32(mpp_cfg_, "h265:level", 120);   // Level 4.0
     RTC_LOG(LS_INFO) << "Encoder: HEVC Main Profile, Level 4.0";
   } else {
-    // H.264 Constrained Baseline — maximum compatibility with all
-    // WebRTC decoders.  CABAC/8x8 transform disabled (those are High
-    // Profile features that can confuse some decoder pipelines).
-    mpp_enc_cfg_set_s32(mpp_cfg_, "h264:profile", 66);   // Baseline
-    mpp_enc_cfg_set_s32(mpp_cfg_, "h264:level", 31);     // Level 3.1
-    mpp_enc_cfg_set_s32(mpp_cfg_, "h264:cabac_en", 0);   // CAVLC only
+    // H.264 High Profile — matching GStreamer rockchip-mpp plugins.
+    // CABAC gives ~15% better compression, 8x8 transform improves detail.
+    mpp_enc_cfg_set_s32(mpp_cfg_, "h264:profile", 100);  // High
+    mpp_enc_cfg_set_s32(mpp_cfg_, "h264:level", 40);     // Level 4.0
+    mpp_enc_cfg_set_s32(mpp_cfg_, "h264:cabac_en", 1);   // CABAC
     mpp_enc_cfg_set_s32(mpp_cfg_, "h264:cabac_idc", 0);
-    mpp_enc_cfg_set_s32(mpp_cfg_, "h264:trans8x8", 0);   // 4x4 only
+    mpp_enc_cfg_set_s32(mpp_cfg_, "h264:trans8x8", 1);   // 8x8 transform
 
-    // Explicitly enable deblocking filter
-    mpp_enc_cfg_set_s32(mpp_cfg_, "h264:deblk_dis", 0);  // 0 = enabled
-    mpp_enc_cfg_set_s32(mpp_cfg_, "h264:deblk_alpha", 0);
-    mpp_enc_cfg_set_s32(mpp_cfg_, "h264:deblk_beta", 0);
-
-    RTC_LOG(LS_INFO) << "Encoder: H.264 Constrained Baseline, Level 3.1, "
-                        "deblocking ON, single-slice";
+    RTC_LOG(LS_INFO) << "Encoder: H.264 High Profile, Level 4.0, "
+                        "CABAC, 8x8, single-slice";
   }
 
   return true;
 }
 
 bool RockchipVideoEncoder::ConfigureRateControl() {
-  // VBR mode: allows burst during motion, essential for clean video
+  // VBR with tight band — GStreamer-style VBR bounds.
+  // +6.25% max prevents pacer overflow, wide min floor allows low-motion
+  // savings.
   mpp_enc_cfg_set_s32(mpp_cfg_, "rc:mode", MPP_ENC_RC_MODE_VBR);
   mpp_enc_cfg_set_s32(mpp_cfg_, "rc:bps_target", bitrate_bps_);
-  // Allow 4x peak during motion scenes for clean video
-  mpp_enc_cfg_set_s32(mpp_cfg_, "rc:bps_max",
-                      static_cast<int>(bitrate_bps_ * 4));
-  mpp_enc_cfg_set_s32(mpp_cfg_, "rc:bps_min",
-                      static_cast<int>(bitrate_bps_ * 0.1));
+  mpp_enc_cfg_set_s32(mpp_cfg_, "rc:bps_max", bitrate_bps_ * 17 / 16);
+  mpp_enc_cfg_set_s32(mpp_cfg_, "rc:bps_min", bitrate_bps_ * 1 / 16);
 
+  // QP: full range matching GStreamer defaults.  The encoder gracefully
+  // degrades quality under bandwidth pressure rather than dropping frames.
   mpp_enc_cfg_set_s32(mpp_cfg_, "rc:qp_init", 26);
   mpp_enc_cfg_set_s32(mpp_cfg_, "rc:qp_min", 10);
-  mpp_enc_cfg_set_s32(mpp_cfg_, "rc:qp_max", 36);
+  mpp_enc_cfg_set_s32(mpp_cfg_, "rc:qp_max", 51);
   mpp_enc_cfg_set_s32(mpp_cfg_, "rc:qp_min_i", 10);
-  mpp_enc_cfg_set_s32(mpp_cfg_, "rc:qp_max_i", 30);
+  mpp_enc_cfg_set_s32(mpp_cfg_, "rc:qp_max_i", 51);
+  mpp_enc_cfg_set_s32(mpp_cfg_, "rc:qp_ip", 2);   // I-P QP delta
+
+  // Allow 1 re-encode attempt per frame for better quality
+  mpp_enc_cfg_set_u32(mpp_cfg_, "rc:max_reenc_times", 1);
 
   // FPS configuration
   mpp_enc_cfg_set_s32(mpp_cfg_, "rc:fps_in_flex", 0);
@@ -346,7 +345,7 @@ bool RockchipVideoEncoder::ConfigureRateControl() {
   mpp_enc_cfg_set_s32(mpp_cfg_, "rc:gop", kDefaultGOP);
 
   RTC_LOG(LS_INFO) << "Rate control: VBR target=" << bitrate_bps_
-                   << " peak=" << bitrate_bps_ * 4
+                   << " max=" << bitrate_bps_ * 17 / 16
                    << " @ " << framerate_ << " fps, GOP=" << kDefaultGOP;
   return true;
 }
@@ -770,10 +769,8 @@ void RockchipVideoEncoder::SetRates(const RateControlParameters& parameters) {
   MPP_RET ret = mpp_mpi_->control(mpp_ctx_, MPP_ENC_GET_CFG, mpp_cfg_);
   if (ret == MPP_OK) {
     mpp_enc_cfg_set_s32(mpp_cfg_, "rc:bps_target", bitrate_bps_);
-    mpp_enc_cfg_set_s32(mpp_cfg_, "rc:bps_max",
-                        static_cast<int>(bitrate_bps_ * 4));
-    mpp_enc_cfg_set_s32(mpp_cfg_, "rc:bps_min",
-                        static_cast<int>(bitrate_bps_ * 0.1));
+    mpp_enc_cfg_set_s32(mpp_cfg_, "rc:bps_max", bitrate_bps_ * 17 / 16);
+    mpp_enc_cfg_set_s32(mpp_cfg_, "rc:bps_min", bitrate_bps_ * 1 / 16);
     mpp_enc_cfg_set_s32(mpp_cfg_, "rc:fps_out_num", framerate_);
     mpp_enc_cfg_set_s32(mpp_cfg_, "rc:fps_in_num", framerate_);
 
@@ -799,19 +796,15 @@ VideoEncoder::EncoderInfo RockchipVideoEncoder::GetEncoderInfo() const {
   info.preferred_pixel_formats = {VideoFrameBuffer::Type::kNV12,
                                   VideoFrameBuffer::Type::kI420};
 
-  // CRITICAL: Disable WebRTC's quality scaler.  Without this, WebRTC
-  // aggressively downscales from 1280x720 → 320x180 at startup because
-  // the initial bandwidth estimate is low (~290kbps).  The hardware
-  // encoder handles low-bitrate encoding at full resolution just fine.
+  // Lock resolution — no downscaling.  The hardware encoder handles low
+  // bitrate at full resolution fine; quality on a 4K TV matters more
+  // than framerate.
   info.scaling_settings = VideoEncoder::ScalingSettings::kOff;
-
-  // Tell WebRTC the hardware encoder can handle 1280x720 at very low
-  // bitrate — don't downscale on our behalf.
   info.resolution_bitrate_limits = {
       VideoEncoder::ResolutionBitrateLimits(320 * 180, 30000, 30000, 500000),
-      VideoEncoder::ResolutionBitrateLimits(640 * 360, 50000, 50000, 1500000),
-      VideoEncoder::ResolutionBitrateLimits(1280 * 720, 100000, 100000, 4000000),
-      VideoEncoder::ResolutionBitrateLimits(1920 * 1080, 200000, 200000, 8000000),
+      VideoEncoder::ResolutionBitrateLimits(640 * 360, 30000, 30000, 1500000),
+      VideoEncoder::ResolutionBitrateLimits(1280 * 720, 30000, 30000, 4000000),
+      VideoEncoder::ResolutionBitrateLimits(1920 * 1080, 30000, 30000, 8000000),
   };
 
   return info;
