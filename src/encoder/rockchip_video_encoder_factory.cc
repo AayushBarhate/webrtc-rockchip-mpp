@@ -48,24 +48,31 @@ std::vector<SdpVideoFormat> RockchipVideoEncoderFactory::GetSupportedFormats()
     return supported_formats;
   }
 
-  // H.264 Constrained Baseline Profile (Level 3.1)
-  // This is the most widely compatible profile for WebRTC
+  // H.265/HEVC — offered first as preferred codec.
+  // Chrome 136+ and Safari support HEVC in WebRTC.
+  // Firefox does not — H.264 fallback handles that.
   supported_formats.push_back(SdpVideoFormat(
-      kH264CodecName,
-      {{kH264FmtpProfileLevelId, kH264ProfileLevelConstrainedBaseline},
-       {kH264FmtpLevelAsymmetryAllowed, "1"},
-       {kH264FmtpPacketizationMode, "1"}}));
+      kH265CodecName,
+      {{"profile-id", "1"}}));  // Main Profile
 
-  // H.264 Constrained High Profile (Level 3.1)
-  // Better compression, supported by most modern clients
+  // H.264 Constrained High Profile — CABAC enabled for ~15% better
+  // compression.  Modern WebRTC endpoints handle this fine.
   supported_formats.push_back(SdpVideoFormat(
       kH264CodecName,
       {{kH264FmtpProfileLevelId, kH264ProfileLevelConstrainedHigh},
        {kH264FmtpLevelAsymmetryAllowed, "1"},
        {kH264FmtpPacketizationMode, "1"}}));
 
+  // H.264 Constrained Baseline Profile (Level 3.1)
+  // Widest compatibility fallback
+  supported_formats.push_back(SdpVideoFormat(
+      kH264CodecName,
+      {{kH264FmtpProfileLevelId, kH264ProfileLevelConstrainedBaseline},
+       {kH264FmtpLevelAsymmetryAllowed, "1"},
+       {kH264FmtpPacketizationMode, "1"}}));
+
   RTC_LOG(LS_INFO) << "Rockchip encoder supports " << supported_formats.size()
-                   << " H.264 profiles";
+                   << " codec profiles (H.265 + H.264)";
 
   return supported_formats;
 }
@@ -76,7 +83,12 @@ bool RockchipVideoEncoderFactory::IsFormatSupported(
     return false;
   }
 
-  // Only H.264 is supported by RK3588 MPP hardware encoder
+  // H.265/HEVC
+  if (absl::EqualsIgnoreCase(format.name, kH265CodecName)) {
+    return true;
+  }
+
+  // H.264
   if (!absl::EqualsIgnoreCase(format.name, kH264CodecName)) {
     return false;
   }
@@ -112,8 +124,14 @@ RockchipVideoEncoderFactory::Create(const Environment& env,
     return nullptr;
   }
 
-  RTC_LOG(LS_INFO) << "Creating RockchipVideoEncoder for " << format.name;
-  return std::make_unique<RockchipVideoEncoder>();
+  // Select codec type based on negotiated format
+  if (absl::EqualsIgnoreCase(format.name, kH265CodecName)) {
+    RTC_LOG(LS_INFO) << "Creating RockchipVideoEncoder for H.265/HEVC";
+    return std::make_unique<RockchipVideoEncoder>(MPP_VIDEO_CodingHEVC);
+  }
+
+  RTC_LOG(LS_INFO) << "Creating RockchipVideoEncoder for H.264";
+  return std::make_unique<RockchipVideoEncoder>(MPP_VIDEO_CodingAVC);
 }
 
 VideoEncoderFactory::CodecSupport

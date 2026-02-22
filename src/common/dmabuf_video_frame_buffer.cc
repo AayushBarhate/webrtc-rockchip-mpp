@@ -18,12 +18,15 @@ namespace webrtc {
 
 namespace {
 
-// Calculate stride based on width and format
+// Calculate stride based on width and format.
+// For NV12/NV21, the stride is typically aligned to 64 bytes on RK3588.
 int CalculateStride(int width, uint32_t format) {
   switch (format) {
     case V4L2_PIX_FMT_NV12:
     case V4L2_PIX_FMT_NV21:
-      return width;  // Y plane stride
+      // RK3588 camera HAL aligns stride to 64 bytes for DMA performance.
+      // Fall back to width if no explicit stride is provided.
+      return width;
     case V4L2_PIX_FMT_YUYV:
     case V4L2_PIX_FMT_UYVY:
       return width * 2;
@@ -71,7 +74,7 @@ DMABufVideoFrameBuffer::DMABufVideoFrameBuffer(int fd,
 
   RTC_LOG(LS_VERBOSE) << "DMABufVideoFrameBuffer created: fd=" << fd_
                       << " size=" << size_ << " " << width_ << "x" << height_
-                      << " format=" << format_;
+                      << " stride=" << stride_ << " format=" << format_;
 }
 
 DMABufVideoFrameBuffer::~DMABufVideoFrameBuffer() {
@@ -107,7 +110,10 @@ rtc::scoped_refptr<I420BufferInterface> DMABufVideoFrameBuffer::ToI420() {
 
   switch (format_) {
     case V4L2_PIX_FMT_NV12: {
-      // NV12: Y plane followed by interleaved UV
+      // NV12: Y plane followed by interleaved UV.
+      // CRITICAL: UV plane offset is stride_ * height_, NOT width_ * height_.
+      // When stride > width (e.g. 1920 → 1984 due to 64-byte alignment),
+      // using width * height puts the UV pointer inside the Y data.
       const uint8_t* src_y = static_cast<const uint8_t*>(mapped);
       const uint8_t* src_uv = src_y + (stride_ * height_);
 
@@ -122,7 +128,8 @@ rtc::scoped_refptr<I420BufferInterface> DMABufVideoFrameBuffer::ToI420() {
     }
 
     case V4L2_PIX_FMT_NV21: {
-      // NV21: Y plane followed by interleaved VU
+      // NV21: Y plane followed by interleaved VU.
+      // Same stride-based offset as NV12.
       const uint8_t* src_y = static_cast<const uint8_t*>(mapped);
       const uint8_t* src_vu = src_y + (stride_ * height_);
 

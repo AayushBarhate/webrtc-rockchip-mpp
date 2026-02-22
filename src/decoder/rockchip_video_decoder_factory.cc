@@ -48,6 +48,11 @@ RockchipVideoDecoderFactory::GetSupportedFormats() const {
     return supported_formats;
   }
 
+  // H.265/HEVC — Main Profile
+  supported_formats.push_back(SdpVideoFormat(
+      kH265CodecName,
+      {{"profile-id", "1"}}));
+
   // MPP hardware decoder handles all H.264 profiles.
   // Advertise all of them so the wrapper's IsSameCodec check matches
   // regardless of what profile the remote peer negotiates.
@@ -88,7 +93,7 @@ RockchipVideoDecoderFactory::GetSupportedFormats() const {
        {kH264FmtpPacketizationMode, "1"}}));
 
   RTC_LOG(LS_INFO) << "Rockchip decoder supports " << supported_formats.size()
-                   << " H.264 profiles";
+                   << " codec profiles (H.265 + H.264)";
 
   return supported_formats;
 }
@@ -99,7 +104,12 @@ bool RockchipVideoDecoderFactory::IsFormatSupported(
     return false;
   }
 
-  // Only H.264 is supported by RK3588 MPP hardware decoder
+  // H.265/HEVC
+  if (absl::EqualsIgnoreCase(format.name, kH265CodecName)) {
+    return true;
+  }
+
+  // H.264
   if (!absl::EqualsIgnoreCase(format.name, kH264CodecName)) {
     return false;
   }
@@ -136,8 +146,14 @@ RockchipVideoDecoderFactory::Create(
     return nullptr;
   }
 
-  RTC_LOG(LS_INFO) << "Creating RockchipVideoDecoder for " << format.name;
-  return std::make_unique<RockchipVideoDecoder>();
+  // Select codec type based on negotiated format
+  if (absl::EqualsIgnoreCase(format.name, kH265CodecName)) {
+    RTC_LOG(LS_INFO) << "Creating RockchipVideoDecoder for H.265/HEVC";
+    return std::make_unique<RockchipVideoDecoder>(MPP_VIDEO_CodingHEVC);
+  }
+
+  RTC_LOG(LS_INFO) << "Creating RockchipVideoDecoder for H.264";
+  return std::make_unique<RockchipVideoDecoder>(MPP_VIDEO_CodingAVC);
 }
 
 }  // namespace webrtc

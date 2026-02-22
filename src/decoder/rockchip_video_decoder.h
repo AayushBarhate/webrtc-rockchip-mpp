@@ -30,7 +30,9 @@ namespace webrtc {
 
 class RockchipVideoDecoder : public VideoDecoder {
  public:
-  RockchipVideoDecoder();
+  // codec_type: MPP_VIDEO_CodingAVC or MPP_VIDEO_CodingHEVC
+  explicit RockchipVideoDecoder(
+      MppCodingType codec_type = MPP_VIDEO_CodingAVC);
   ~RockchipVideoDecoder() override;
 
   // VideoDecoder implementation.
@@ -48,6 +50,9 @@ class RockchipVideoDecoder : public VideoDecoder {
   const char* ImplementationName() const override;
 
  private:
+  // Codec type (AVC or HEVC)
+  MppCodingType codec_type_;
+
   // MPP context and API
   MppCtx mpp_ctx_;
   MppApi* mpp_mpi_;

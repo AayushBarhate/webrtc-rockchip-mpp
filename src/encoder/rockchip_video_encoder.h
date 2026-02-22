@@ -5,7 +5,9 @@
 #ifndef MODULES_VIDEO_CODING_CODECS_MPP_ROCKCHIP_VIDEO_ENCODER_H_
 #define MODULES_VIDEO_CODING_CODECS_MPP_ROCKCHIP_VIDEO_ENCODER_H_
 
+#include <atomic>
 #include <memory>
+#include <thread>
 #include <vector>
 
 #include "api/video_codecs/video_encoder.h"
@@ -29,9 +31,18 @@ extern "C" {
 
 namespace webrtc {
 
+// Stride alignment for RK3588 — camera HAL and VPU both expect 64-byte
+// aligned horizontal stride for NV12/NV21 buffers.
+constexpr int kRk3588StrideAlign = 64;
+
+// Buffer pool size for non-blocking encode pipeline.
+constexpr int kBufferPoolSize = 3;
+
 class RockchipVideoEncoder : public VideoEncoder {
  public:
-  RockchipVideoEncoder();
+  // codec_type: MPP_VIDEO_CodingAVC or MPP_VIDEO_CodingHEVC
+  explicit RockchipVideoEncoder(
+      MppCodingType codec_type = MPP_VIDEO_CodingAVC);
   ~RockchipVideoEncoder() override;
 
   // VideoEncoder implementation.
@@ -53,11 +64,21 @@ class RockchipVideoEncoder : public VideoEncoder {
 
   EncoderInfo GetEncoderInfo() const override;
 
+  // Request GDR (gradual decoder refresh) instead of full IDR on next PLI.
+  void RequestGradualRefresh();
+
  private:
+  // Codec type (AVC or HEVC)
+  MppCodingType codec_type_;
+
   // MPP context and API
   MppCtx mpp_ctx_;
   MppApi* mpp_mpi_;
   MppBufferGroup buffer_group_;
+
+  // Buffer pool: pre-allocated MppBuffers for non-blocking encode
+  MppBuffer buffer_pool_[kBufferPoolSize];
+  int buffer_pool_idx_;
 
   // Encoder configuration
   MppEncCfg mpp_cfg_;
@@ -72,16 +93,45 @@ class RockchipVideoEncoder : public VideoEncoder {
   uint64_t frame_count_;
   int64_t last_timestamp_ms_;
 
+  // Scene change detection state
+  uint32_t prev_histogram_[16];
+  bool has_prev_histogram_;
+
+  // GDR (gradual decoder refresh) state
+  bool gdr_requested_;
+  int total_mbs_;
+
+  // LTR (long-term reference) state
+  uint64_t ltr_interval_;
+  int32_t ltr_index_;
+
   // Thread safety
   webrtc::Mutex mutex_;
+
+  // Cached stride values
+  int hor_stride_;
+  int ver_stride_;
 
   // Helper functions
   bool ConfigureEncoder();
   bool ConfigureRateControl();
+  bool ConfigureROI(MppFrame mpp_frame);
+  bool InitBufferPool();
+  void DestroyBufferPool();
+  MppBuffer GetPoolBuffer();
   MppBuffer ImportDMABuffer(int fd, size_t size, int width, int height);
   bool SendFrame(MppFrame mpp_frame);
-  bool RetrievePacket(int64_t timestamp_us, VideoFrameType frame_type,
+  bool RetrievePacket(uint32_t rtp_timestamp, int64_t timestamp_us,
+                      VideoFrameType frame_type,
                       bool force_keyframe = false);
+
+  // Scene change detection
+  bool DetectSceneChange(const uint8_t* y_plane, int width, int height,
+                         int stride);
+
+  // Lightweight histogram computation on downscaled frame
+  void ComputeHistogram(const uint8_t* y_plane, int width, int height,
+                        int stride, uint32_t histogram[16]);
 
   // Disallow copy and assign
   RockchipVideoEncoder(const RockchipVideoEncoder&) = delete;

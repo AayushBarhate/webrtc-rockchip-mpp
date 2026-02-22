@@ -23,8 +23,9 @@ constexpr int kMaxDecodeTimeoutMs = 100;  // 100ms timeout for decode
 
 }  // namespace
 
-RockchipVideoDecoder::RockchipVideoDecoder()
-    : mpp_ctx_(nullptr),
+RockchipVideoDecoder::RockchipVideoDecoder(MppCodingType codec_type)
+    : codec_type_(codec_type),
+      mpp_ctx_(nullptr),
       mpp_mpi_(nullptr),
       frame_group_(nullptr),
       mpp_cfg_(nullptr),
@@ -33,7 +34,9 @@ RockchipVideoDecoder::RockchipVideoDecoder()
       height_(0),
       frame_count_(0),
       last_decode_time_ms_(0) {
-  RTC_LOG(LS_INFO) << "RockchipVideoDecoder: Constructor";
+  RTC_LOG(LS_INFO) << "RockchipVideoDecoder: Constructor (codec="
+                    << (codec_type == MPP_VIDEO_CodingHEVC ? "HEVC" : "AVC")
+                    << ")";
 }
 
 RockchipVideoDecoder::~RockchipVideoDecoder() {
@@ -52,8 +55,8 @@ bool RockchipVideoDecoder::Configure(const Settings& settings) {
     return false;
   }
 
-  // Step 2: Initialize MPP for H.264 decoding
-  ret = mpp_init(mpp_ctx_, MPP_CTX_DEC, MPP_VIDEO_CodingAVC);
+  // Step 2: Initialize MPP for decoding (AVC or HEVC)
+  ret = mpp_init(mpp_ctx_, MPP_CTX_DEC, codec_type_);
   if (ret != MPP_OK) {
     RTC_LOG(LS_ERROR) << "mpp_init failed: " << ret;
     mpp_destroy(mpp_ctx_);
@@ -98,7 +101,10 @@ bool RockchipVideoDecoder::Configure(const Settings& settings) {
   frame_count_ = 0;
   last_decode_time_ms_ = 0;
 
-  RTC_LOG(LS_INFO) << "RockchipVideoDecoder configured successfully";
+  const char* codec_name = (codec_type_ == MPP_VIDEO_CodingHEVC)
+                               ? "HEVC" : "AVC";
+  RTC_LOG(LS_INFO) << "RockchipVideoDecoder configured successfully ("
+                   << codec_name << ")";
   return true;
 }
 
@@ -379,14 +385,17 @@ RockchipVideoDecoder::ConvertMppFrameToVideoFrame(MppFrame mpp_frame) {
   rtc::scoped_refptr<I420Buffer> i420_buffer =
       I420Buffer::Create(width, height);
 
+  // UV plane offset MUST use hor_stride * ver_stride (not width * height).
+  // When stride > width (due to alignment), using width * height causes
+  // the UV pointer to land inside the Y plane data, corrupting colors.
+  const uint8_t* src_y = static_cast<const uint8_t*>(ptr);
+  const uint8_t* src_uv = src_y + (hor_stride * ver_stride);
+
   // Convert based on format.
   // RK3588 RKVDEC reports MPP_FMT_YUV420SP (NV12) but the chroma plane
   // is actually VU-interleaved (NV21).  Use NV21ToI420 for both cases
   // on this SoC to get correct colors.
   if (fmt == MPP_FMT_YUV420SP || fmt == MPP_FMT_YUV420SP_VU) {
-    const uint8_t* src_y = static_cast<const uint8_t*>(ptr);
-    const uint8_t* src_uv = src_y + (hor_stride * ver_stride);
-
     libyuv::NV21ToI420(
         src_y, hor_stride,
         src_uv, hor_stride,
@@ -403,7 +412,8 @@ RockchipVideoDecoder::ConvertMppFrameToVideoFrame(MppFrame mpp_frame) {
 }
 
 const char* RockchipVideoDecoder::ImplementationName() const {
-  return "RockchipMPP";
+  return (codec_type_ == MPP_VIDEO_CodingHEVC)
+             ? "RockchipMPP_HEVC" : "RockchipMPP";
 }
 
 }  // namespace webrtc
